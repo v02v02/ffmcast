@@ -1,0 +1,13 @@
+#!/bin/bash
+
+# See `ffmcast-start`
+
+# If there is no temp text file named "ffmpeg_temp_fifo.txt", do nothing.
+temp_txt="/tmp/ffmpeg_temp_fifo.txt"
+[[ -f $temp_txt ]] || exit 1
+
+# Sends the character 'q' to a named pipe that is connected to ffmpeg.
+# ffmpeg then reads the input which goes to an interactive prompt causing the screencast to end.
+temp_fifo=$(cat $temp_txt)
+echo 'q' > $temp_fifo
+

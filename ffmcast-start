@@ -1,0 +1,106 @@
+#!/bin/bash
+
+# Dependencies: dunst, sxhkd, ffmpeg, pulseaudio, x11
+
+# Change this variable to control how long the script takes before ffmpeg starts screencasting after the script has been executed.
+screencast_delay=3
+# Change this variable to tell the script what directory to save your finished screencasts.
+screencast_path="${HOME}/Videos/screencasts/"
+# This variable runs a sed script on the rc file for sxhkd that searches for the string "# Stops screencast recording".
+# After sed finds that string, it will skip to the next line after the aforementioned string and get the contents of the next full line (which should contain the hotkey needed to stop this script) and wrap it around quotes.
+screencast_hotkey_terminate=$(sed -n '/# Stops screencast recording/{n; s/^/"/; s/$/"/; p;}' ${HOME}/.config/sxhkd/sxhkdrc)
+
+# Paths for images to use as icons for dunst notifications.
+icon_path_screencast="${HOME}/.local/share/icons/dunst/screencast.svg"
+icon_path_screencast_error="${HOME}/.local/share/icons/dunst/screencast-error.svg"
+
+# Paths for sounds to use in conjuction dunst notifications.
+sound_path_screencast_start="${HOME}/.local/share/sounds/notification-quiet-001.wav"
+sound_path_screencast_error_quiet="${HOME}/.local/share/sounds/system-error-004.wav"
+sound_path_screencast_error_general="${HOME}/.local/share/sounds/system-error-001.wav"
+sound_path_screencast_success="${HOME}/.local/share/sounds/notification-general-001.wav"
+
+# The variable $temp_fifo contains the full path and name of a temporary fifo file, which is stored in the /tmp directory.
+# $temp_txt is used to output to a temporary text file used to communicate with another script (ffmcast-end) to end this script.
+# $temp_lock is the path of a lock file with the name of the lock file being the name of this script with .lock appended.
+temp_fifo=$(mktemp -u)
+temp_txt="/tmp/ffmpeg_temp_fifo.txt"
+temp_lock="/tmp/${0##*/}.lock"
+
+# These functions are dunst notifications paired with mpv playing sound clips to inform users on events that the script is invoking.
+notification-start-screencast(){
+    dunstify -i ${icon_path_screencast} -t 2500 "Screencasting" "Starting in ${screencast_delay} seconds.\nPress ${screencast_hotkey_terminate} to stop the recording."
+    paplay ${sound_path_screencast_start}
+}
+
+notification-success(){
+    dunstify -i ${icon_path_screencast} -t 15000 "Screencast Saved" "Saved to ${screencast_path}${screencast_name}"
+    paplay ${sound_path_screencast_success}
+}
+
+notification-error-runninginstance(){
+    dunstify -i ${icon_path_screencast_error} -t 5000 "Screencast Failed" "This script is currently screencasting already."
+    paplay ${sound_path_screencast_error_quiet}
+    exit 32
+}
+
+notification-error-ffmpeg(){
+    dunstify -i ${icon_path_screencast_error} -t 30000 "Screencast Error" "Some error has occured with ffmpeg creating the screencast.\nExit code: ${ffmpeg_exit_code}"
+    paplay ${sound_path_screencast_error_general}
+}
+
+notification-error-mv(){
+    dunstify -i ${icon_path_screencast_error} -t 30000 "Screencast Couldn't Be Moved" "The screencast video file ${screencast_name} could not be moved to ${screencast_path} because the directory doesn't exist."
+    paplay ${sound_path_screencast_error_quiet}
+}
+
+# The script checks to see if this same script is already running on the system.
+# If so, send a notification saying that a screencast is already taking place and that the script failed.
+# The script then ends with a non-zero exit code.
+exec 9>"${temp_lock}"
+flock -n 9 || notification-error-runninginstance
+
+# Sends a dunst notification that a screencast is about to start in $screencast_delay amount of seconds.
+# The notification also tells users the hotkey needed to end the screencast with the use of the $screencast_hotkey_terminate variable.
+# Then the script waits for the $screencast_delay amount of seconds to make ffmpeg take a screencast.
+notification-start-screencast
+sleep ${screencast_delay}
+
+# A temporary named pipe file is created that is going to be used to take input to pipe into ffmpeg.
+# This will be used to remotely end the screencast via the use of another script (screencast-end) by echoing the character 'q' into ffmpeg.
+# pkill or a method simliar to that is not used due to ffmpeg not returning a non-zero exit code and problems with sxhkd not executing pkill.
+mkfifo -m 600 ${temp_fifo}
+# The contents of $temp_fifo is outputted into a temp text file so that an external script (screencast-end) can find out what fifo file to echo 'q' into to end the screencast.
+echo "$temp_fifo" > ${temp_txt}
+
+# ffmpeg starts the screencast with the filename being the $screencast_name variable defined below.
+# The $screencast_name variable is not defined at the start of the script to get the most accurate time possible for the name of the video file.
+screencast_name=$(date +%G-%m-%d-%H:%M:%S_ffmcast.mp4)
+
+# If the ffmpeg pipeline succeeds check to see if the $screencast_path directory exists.
+if cat ${temp_fifo} | ffmpeg -f x11grab -s 1920x1080 -i :0.0+0,0 -f pulse -i default file:${screencast_name}
+then
+    # The screencast file is moved to the directory that the $screencast_path variable defines above, only if the directory exists.
+    # If the $screencast_path directory exists and ffmpeg's exit code was zero, send a dunst notification to tell the user that the screencast has been successfully saved along with the full path and name of the saved screencast.
+    # If the directory does not exist, let the user know via notification.
+    if [[ -d "${screencast_path}" ]]
+    then
+	mv ./${screencast_name} ${screencast_path}
+	notification-success
+    else
+	notification-error-mv
+    fi
+else
+    # If the ffmpeg pipeline fails then give the user a notification that an error has occured with the screencast along with the exit code of ffmpeg contained within the notification.
+    ffmpeg_exit_code="$?"
+    notification-error-ffmpeg
+fi
+
+# After ffmpeg has finished, the temporary named pipe file and text file is removed for cleanup.
+rm ${temp_fifo} ${temp_txt}
+
+# If ffmpeg ends with a non-zero exit code, make `$0` exit with a non-zero code.
+if [[ ${ffmpeg_exit_code} -ne 0 || '' ]]
+then
+    exit ${ffmpeg_exit_code}
+fi
